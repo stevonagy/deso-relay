@@ -1,24 +1,49 @@
 <!doctype html>
 <html>
-  <head><meta charset="utf-8"><title>DeSo Relay</title></head>
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DeSo Relay</title></head>
   <body>
     <script>
       (function () {
         try {
           var u = new URL(location.href);
-          var redirect = u.searchParams.get('redirect');
+          var redirect = u.searchParams.get('redirect'); // npr. desomobile://derive
+          var pkg = u.searchParams.get('pkg');           // Android package (npr. com.yourname.desomobile)
+
           if (!redirect) throw new Error('Missing redirect');
 
-          // Preuzmi SVE parametre koje je Identity dodao, osim našeg "redirect"
+          // Svi parametri koje je Identity dodao (derivedSeedHex, itd.), osim našeg "redirect" i "pkg"
           var params = new URLSearchParams(u.search);
-          params.delete('redirect'); // ostave se npr. derivedSeedHex, publicKeyBase58Check, ...
-
-          var target = decodeURIComponent(redirect);
+          params.delete('redirect');
+          params.delete('pkg');
           var qs = params.toString();
-          if (qs) target += (target.includes('?') ? '&' : '?') + qs;
 
-          // Odmah natrag u app:
-          location.replace(target);
+          // 1) Pokušaj direktno otvoriti custom scheme
+          var target = decodeURIComponent(redirect);
+          if (qs) target += (target.includes('?') ? '&' : '?') + qs;
+          var tried = false;
+
+          function openDirect() {
+            tried = true;
+            location.href = target; // npr. desomobile://derive?derivedSeedHex=...
+          }
+
+          // 2) Ako je Android i custom scheme se blokira, probaj INTENT fallback
+          function openIntentFallback() {
+            if (!/Android/i.test(navigator.userAgent) || !pkg) return;
+            // pretvori "desomobile://<path+query>" u "intent://<path+query>#Intent;scheme=desomobile;package=<pkg>;end"
+            var after = decodeURIComponent(redirect).replace(/^desomobile:\/\//, '');
+            // ako još nema parametara u "after", dodaj ih:
+            var intentUrl = 'intent://' + after + (qs ? (after.includes('?') ? '&' : '?') + qs : '') +
+                            '#Intent;scheme=desomobile;package=' + pkg + ';end';
+            location.href = intentUrl;
+          }
+
+          // Pokreni: prvo custom scheme, pa vrlo brzo intent fallback
+          openDirect();
+          setTimeout(function () {
+            if (!tried) return;
+            openIntentFallback();
+          }, 50);
         } catch (e) {
           document.body.innerText = 'Relay error: ' + (e && e.message ? e.message : e);
         }
