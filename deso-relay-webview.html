@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>DeSo Relay (WebView bridge)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; }
+    code { background:#f3f3f3; padding:2px 4px; border-radius:4px; }
+    .ok{color:#0a7a0a} .err{color:#a00}
+  </style>
+</head>
+<body>
+  <h3>DeSo Relay (WebView bridge)</h3>
+  <div id="status">Waiting…</div>
+  <script>
+    (function () {
+      try {
+        var isRN = !!(window.ReactNativeWebView && window.ReactNativeWebView.postMessage);
+        var search = new URLSearchParams(window.location.search || '');
+        var hash = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+
+        // Spremi sve parametre iz query # i ? u jedan objekt
+        var params = {};
+        search.forEach(function(v, k){ params[k] = v; });
+        hash.forEach(function(v, k){ params[k] = v; });
+
+        // RN mode: pošalji payload natrag u app kao JSON
+        if (isRN) {
+          var payload = { event: 'derive-complete', params: params };
+          document.getElementById('status').innerHTML =
+            '<span class="ok">Posting payload to React Native WebView…</span>';
+          window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+          // Ostanemo na stranici; nije potreban redirect
+          return;
+        }
+
+        // Browser fallback: ako nije RN, pokušaj redirect u app (desomobile://...)
+        var redirect = search.get('redirect');
+        if (!redirect) {
+          document.getElementById('status').innerHTML =
+            '<span class="err">Missing <code>redirect</code> param.</span>';
+          return;
+        }
+        var out = new URLSearchParams();
+        Object.keys(params).forEach(function(k){
+          if (k !== 'redirect' && k !== 'pkg') out.set(k, params[k]);
+        });
+        var target = redirect + (out.toString() ? ('?' + out.toString()) : '');
+        document.getElementById('status').innerHTML =
+          '<span class="ok">Redirecting…</span><br/><code>' + target + '</code>';
+        setTimeout(function () { window.location.href = target; }, 0);
+      } catch (e) {
+        document.getElementById('status').innerHTML =
+          '<span class="err">Relay error:</span> ' + (e && e.message ? e.message : e);
+      }
+    })();
+  </script>
+</body>
+</html>
