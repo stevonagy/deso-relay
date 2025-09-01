@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>DeSo Identity Bridge</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  html,body { margin:0; padding:0; height:100%; background:#000; color:#fff; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif }
+  #wrap { position:fixed; inset:0; display:flex; flex-direction:column; }
+  #bar { padding:10px 12px; background:#0f172a; font-size:13px; display:flex; gap:8px; align-items:center }
+  #frame { flex:1; position:relative; }
+  iframe { position:absolute; inset:0; width:100%; height:100%; border:0; background:#000; }
+  #log { position:absolute; bottom:0; left:0; right:0; max-height:40%; overflow:auto; font-size:12px; background:#0b1220; padding:6px 10px; border-top:1px solid #17203a }
+  .muted{opacity:.7}
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="bar">DeSo Identity Bridge <span class="muted">– secure host</span></div>
+    <div id="frame">
+      <iframe id="id_iframe" src="https://identity.deso.org/embed?webview=true" allow="clipboard-read; clipboard-write"></iframe>
+      <pre id="log"></pre>
+    </div>
+  </div>
+
+<script>
+(function(){
+  const LOG = document.getElementById('log');
+  const iframe = document.getElementById('id_iframe');
+  const SVC = 'identity';
+  const RN = (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) ? window.ReactNativeWebView : null;
+
+  function uiLog(obj){
+    try { LOG.textContent += JSON.stringify(obj) + "\n"; LOG.scrollTop = LOG.scrollHeight; } catch {}
+    try { RN && RN.postMessage(JSON.stringify({ kind:'debug', data: obj })); } catch {}
+  }
+  function send(msg){ iframe.contentWindow.postMessage(msg, 'https://identity.deso.org'); }
+  function uid(){ return 'id-' + Math.random().toString(36).slice(2) + Date.now().toString(36); }
+
+  // Parametri iz query stringa (dozvoljava override iz RN WebView: ?appName=...&submitPost=10&deso=0.05)
+  const qs = new URLSearchParams(location.search);
+  const appName = qs.get('appName') || 'DesoMobile';
+  const submitPost = parseInt(qs.get('submitPost') || '10', 10);
+  const expirationDays = parseInt(qs.get('expDays') || '30', 10);
+  const desoFloat = parseFloat(qs.get('deso') || '0.05');
+  const desoNanos = Math.round((isFinite(desoFloat) ? desoFloat : 0) * 1e9);
+
+  const LIMIT = {
+    AppName: appName,
+    DerivedKeyExpirationDays: expirationDays,
+    GlobalDESOLimit: desoNanos,
+    TransactionCountLimitMap: { SUBMIT_POST: Math.max(1, submitPost) },
+  };
+
+  let initialized = false;
+
+  iframe.addEventListener('load', function(){
+    const id = uid();
+    uiLog({ event:'initialize_send', id, origin: location.origin });
+    send({ id, method:'initialize', payload:{}, service:SVC });
+  });
+
+  window.addEventListener('message', function(e){
+    // Origin check – prihvati SAMO identity.deso.org
+    if (e.origin !== 'https://identity.deso.org') return;
+    const m = e.data || {};
+    if (m.service !== SVC) return;
+
+    uiLog({ event:'identity_msg', id:m.id, method:m.method, hasPayload: !!m.payload });
+
+    // 1) initialize reply → login
+    if (!initialized && m.id && !m.method) {
+      initialized = true;
+      const id = uid();
+      const login = { id, service:SVC, method:'login', payload:{ accessLevelRequest:2, webview:true } };
+      uiLog({ event:'login_send', id });
+      send(login);
+      return;
+    }
+
+    // 2) login reply → derive
+    if (m.method === 'login' && m.payload) {
+      const pk = m.payload.publicKeyAdded || m.payload.publicKey || m.payload.PublicKeyBase58Check;
+      if (!pk) { uiLog({ event:'login_no_pk' }); return; }
+
+      const id2 = uid();
+      const derive = {
+        id: id2,
+        service: SVC,
+        method: 'derive',
+        payload: {
+          PublicKeyBase58Check: pk,
+          accessLevel: 2,
+          webview: true,
+          TransactionSpendingLimitResponse: LIMIT
+        }
+      };
+      uiLog({ event:'derive_send', id:id2, pk });
+      send(derive);
+      return;
+    }
+
+    // 3) derive reply → normalize + pošalji RN-u
+    if (m.method === 'derive' && m.payload) {
+      const p = m.payload || {};
+      const out = {
+        derivedPublicKeyBase58Check: p.derivedPublicKeyBase58Check || p.DerivedPublicKeyBase58Check || '',
+        jwt: p.jwt || p.JWT || p.authToken || p.AuthToken || p.derivedJwt || p.DerivedJwt || '',
+        publicKey: p.publicKey || p.PublicKeyBase58Check || '',
+        encryptedSeedHex: p.encryptedSeedHex || p.EncryptedSeedHex || '',
+        expirationBlock: p.expirationBlock || p.ExpirationBlock || ''
+      };
+      uiLog({ event:'derive_complete', haveJwt: !!out.jwt, haveDerived: !!out.derivedPublicKeyBase58Check });
+      try { RN && RN.postMessage(JSON.stringify({ event:'derive-complete', params: out })); } catch {}
+    }
+  }, false);
+})();
+</script>
+</body>
+</html>
