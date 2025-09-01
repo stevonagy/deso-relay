@@ -2,54 +2,128 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>DeSo Relay (WebView bridge)</title>
+  <title>DeSo Relay (single-tab login→derive)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 16px; }
-    code { background:#1f2937; color:#d1d5db; padding:2px 4px; border-radius:4px; }
-    .ok{color:#10b981} .err{color:#ef4444}
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 24px; }
+    code { background:#f3f3f3; padding:2px 4px; border-radius:4px; }
+    .ok{color:#0a7a0a} .err{color:#a00}
   </style>
 </head>
 <body>
   <h3>DeSo Relay</h3>
-  <div id="status">Waiting…</div>
+  <div id="status">Starting…</div>
   <script>
     (function () {
-      try {
-        var search = new URLSearchParams(window.location.search || '');
-        var hash = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
-        var params = {};
-        search.forEach(function(v,k){ params[k]=v; });
-        hash.forEach(function(v,k){ params[k]=v; });
+      var out = document.getElementById('status');
 
-        function postToRN(payload) {
-          if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-            document.getElementById('status').innerHTML =
-              '<span class="ok">Posting to React Native WebView…</span><br/><code>'+ JSON.stringify(payload) +'</code>';
-            window.ReactNativeWebView.postMessage(JSON.stringify(payload));
-            return true;
-          }
-          return false;
+      function log(html){ out.innerHTML = html; }
+
+      function parseAllParams(url) {
+        var res = {};
+        function push(raw) {
+          if (!raw) return;
+          raw = raw.replace(/^[?#]/, '');
+          if (!raw) return;
+          raw.split('&').forEach(function (part) {
+            if (!part) return;
+            var eq = part.indexOf('=');
+            var k = decodeURIComponent(eq >= 0 ? part.slice(0, eq) : part);
+            var v = decodeURIComponent(eq >= 0 ? part.slice(eq + 1) : '');
+            res[k] = v;
+            if (v.indexOf('?') >= 0) {
+              v.replace(/^[^?]*\?/, '').split('&').forEach(function (p2) {
+                if (!p2) return;
+                var e2 = p2.indexOf('=');
+                var k2 = decodeURIComponent(e2 >= 0 ? p2.slice(0, e2) : p2);
+                var v2 = decodeURIComponent(e2 >= 0 ? p2.slice(e2 + 1) : '');
+                res[k2] = v2;
+              });
+            }
+          });
         }
+        var q = url.indexOf('?'), h = url.indexOf('#');
+        if (q >= 0) push(url.slice(q, h >= 0 ? h : undefined));
+        if (h >= 0) push(url.slice(h));
+        return res;
+      }
 
-        if (postToRN(params)) return;
+      var params = parseAllParams(location.href);
+      var flow = params.flow; // "login-derive" ili legacy
+      var isRN = !!(window.ReactNativeWebView && window.ReactNativeWebView.postMessage);
 
-        // Browser fallback: redirect to ?redirect=customscheme://path
-        var redirect = search.get('redirect');
+      // Legacy fallback (ako netko i dalje šalje samo ?redirect=desomobile://...)
+      if (!flow) {
+        var redirect = params.redirect;
         if (!redirect) {
-          document.getElementById('status').innerHTML = '<span class="err">Missing <code>redirect</code> param.</span>';
+          log('<span class="err">Missing <code>flow</code> or <code>redirect</code> param.</span>');
           return;
         }
-        var out = new URLSearchParams();
-        Object.keys(params).forEach(function(k){
-          if (k !== 'redirect' && k !== 'pkg') out.set(k, params[k]);
+        var outQS = new URLSearchParams();
+        Object.keys(params).forEach(function (k) {
+          if (k === 'redirect' || k === 'pkg' || k === 'flow' || k === 'limits' || k === 'redirectFinal') return;
+          outQS.set(k, params[k]);
         });
-        var target = redirect + (out.toString() ? ('?' + out.toString()) : '');
-        document.getElementById('status').innerHTML = '<span class="ok">Redirecting…</span><br/><code>' + target + '</code>';
-        setTimeout(function(){ window.location.href = target; }, 0);
+        var target = redirect + (outQS.toString() ? ('?' + outQS.toString()) : '');
+        log('<span class="ok">Redirecting…</span><br/><code>' + target + '</code>');
+        location.replace(target);
+        return;
+      }
+
+      // 🔵 Novi flow: login → derive → app (sve u istom tabu)
+      try {
+        var redirectFinal = params.redirectFinal; // npr. desomobile://derive
+        var limitsJSON = params.limits ? JSON.parse(params.limits) : null;
+
+        // 1) Nakon /log-in Identity vraća ?publicKeyAdded=...
+        if (params.publicKeyAdded && !params.derivedPublicKeyBase58Check) {
+          var pub = params.publicKeyAdded;
+
+          if (!limitsJSON) throw new Error('Missing limits JSON');
+
+          var backToRelay = new URL(location.href);
+          // makni "users" i ostale smeće iz URL-a
+          backToRelay.searchParams.delete('users');
+          backToRelay.searchParams.delete('signedUp');
+
+          // istočisti transient parametre da se ne vrtimo u krug
+          backToRelay.searchParams.delete('publicKeyAdded');
+
+          var derive = new URL('https://identity.deso.org/derive');
+          derive.searchParams.set('callback', backToRelay.toString()); // vrati se opet ovdje
+          derive.searchParams.set('webview', 'true');
+          derive.searchParams.set('PublicKeyBase58Check', pub);
+          derive.searchParams.set('TransactionSpendingLimitResponse', JSON.stringify(limitsJSON));
+
+          log('<span class="ok">Continuing to /derive…</span><br/><code>' + derive.toString() + '</code>');
+          location.replace(derive.toString());
+          return;
+        }
+
+        // 2) Nakon /derive Identity vraća derived parametre → sad idemo u app
+        if (redirectFinal && (params.derivedPublicKeyBase58Check || params.DerivedPublicKeyBase58Check || params.AccessSignature || params.accessSignature)) {
+          var outQS2 = new URLSearchParams();
+          // Minimalni skup koji aplikacija očekuje:
+          var allow = {
+            publicKeyAdded: 1, PublicKeyAdded: 1, PublicKeyBase58Check: 1, publicKey: 1,
+            derivedPublicKeyBase58Check: 1, DerivedPublicKeyBase58Check: 1,
+            transactionSpendingLimitHex: 1, TransactionSpendingLimitHex: 1,
+            accessSignature: 1, AccessSignature: 1,
+            jwt: 1, JWT: 1, derivedJwt: 1, DerivedJWT: 1
+          };
+          Object.keys(params).forEach(function (k) {
+            if (allow[k]) outQS2.set(k, params[k]);
+          });
+          var finalTarget = redirectFinal + (outQS2.toString() ? ('?' + outQS2.toString()) : '');
+          log('<span class="ok">Returning to app…</span><br/><code>' + finalTarget + '</code>');
+          location.replace(finalTarget);
+          return;
+        }
+
+        // 3) Prvi ulaz (nema ničega) ili nepotpuni skup — prikaži status
+        log('<span>Waiting for Identity…</span>');
       } catch (e) {
-        document.getElementById('status').innerHTML =
-          '<span class="err">Relay error:</span> ' + (e && e.message ? e.message : e);
+        log('<span class="err">Relay error:</span> ' + (e && e.message ? e.message : e));
       }
     })();
   </script>
