@@ -27,18 +27,19 @@
 (function(){
   const LOG = document.getElementById('log');
   const iframe = document.getElementById('id_iframe');
-  const SVC = 'identity';
   const RN = (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) ? window.ReactNativeWebView : null;
+  const ID_ORIGIN = 'https://identity.deso.org';
 
+  // ---- helpers -------------------------------------------------------------
   function uiLog(obj){
     try { LOG.textContent += JSON.stringify(obj) + "\n"; LOG.scrollTop = LOG.scrollHeight; } catch {}
     try { RN && RN.postMessage(JSON.stringify({ kind:'debug', data: obj })); } catch {}
   }
-  // Slanje prema iframeu — koristimo targetOrigin='*' (tolerantno) radi različitih varijanti embeda
+  // pošalji poruku u iframe; targetOrigin='*' da budemo tolerantni na varijante
   function send(msg){ iframe.contentWindow && iframe.contentWindow.postMessage(msg, '*'); }
   function uid(){ return 'id-' + Math.random().toString(36).slice(2) + Date.now().toString(36); }
 
-  // Parametri iz queryja:
+  // ---- params (tune preko query stringa) -----------------------------------
   const qs = new URLSearchParams(location.search);
   const appName = qs.get('appName') || 'DesoMobile';
   const submitPost = parseInt(qs.get('submitPost') || '10', 10);
@@ -53,86 +54,96 @@
     TransactionCountLimitMap: { SUBMIT_POST: Math.max(1, submitPost) },
   };
 
-  let initialized = false;
-  let sawFirstIdentityMessage = false;
-  let initAcked = false;
-  let handshakeTries = 0;
-  const MAX_TRIES = 10;
-  let handshakeTimer = null;
+  // ---- handshake state -----------------------------------------------------
+  let sawIframeLoad = false;
+  let sawAnyIdentityMsg = false;     // ✅ čim vidimo BILO koju poruku s identity origin-a
+  let initializeAcked = false;       // kada dobijemo odgovor na initialize (možda bez 'service')
+  let loginSent = false;
+  let deriveSent = false;
+
+  let tries = 0;
+  const MAX_TRIES = 20;
+  const TRY_DELAY_MS = 600;
+  let timer = null;
 
   function sendInitialize() {
     const id = uid();
-    const msg = { id, method:'initialize', payload:{}, service:SVC };
-    uiLog({ event:'initialize_send', id, tries: handshakeTries });
+    const msg = { id, method:'initialize', payload:{}, /* service: 'identity' - nije nužno */ };
+    uiLog({ event:'initialize_send', id, tries });
     send(msg);
   }
 
-  // Retry initialize dok ne dobijemo bilo kakvu identity poruku
-  function ensureHandshake() {
-    if (sawFirstIdentityMessage || initAcked) return;
-    if (handshakeTries >= MAX_TRIES) {
-      uiLog({ event:'initialize_giveup' });
-      return;
-    }
-    handshakeTries++;
+  function scheduleInitializeRetries() {
+    if (tries >= MAX_TRIES || sawAnyIdentityMsg) return;
+    tries++;
     sendInitialize();
-    handshakeTimer = setTimeout(ensureHandshake, 500);
+    timer = setTimeout(scheduleInitializeRetries, TRY_DELAY_MS);
   }
 
+  function sendLogin() {
+    if (loginSent) return;
+    loginSent = true;
+    const id = uid();
+    const msg = {
+      id,
+      method: 'login',
+      payload: { accessLevelRequest: 2, webview: true },
+      // service: 'identity' (nije nužno, embed gleda method)
+    };
+    uiLog({ event:'login_send', id });
+    send(msg);
+  }
+
+  function sendDerive(pk) {
+    if (deriveSent) return;
+    deriveSent = true;
+    const id = uid();
+    const msg = {
+      id,
+      method: 'derive',
+      payload: {
+        PublicKeyBase58Check: pk,
+        accessLevel: 2,
+        webview: true,
+        TransactionSpendingLimitResponse: LIMIT
+      }
+    };
+    uiLog({ event:'derive_send', id, pk });
+    send(msg);
+  }
+
+  // ---- lifecycle -----------------------------------------------------------
   iframe.addEventListener('load', function(){
+    sawIframeLoad = true;
     uiLog({ event:'iframe_loaded' });
-    // Kreni s handshake retryjem
-    ensureHandshake();
+    // pokreni initialize s retryjem dok ne dobijemo ijednu identity poruku
+    tries = 0;
+    if (timer) clearTimeout(timer);
+    scheduleInitializeRetries();
   });
 
+  // ✅ prihvati BILO koju poruku koja dolazi s identity.deso.org
   window.addEventListener('message', function(e){
-    // ➜ NE filtriramo strogo po e.origin jer embed ponekad mijenja poddomene / okolnosti.
-    const m = e && e.data ? e.data : null;
-    if (!m || m.service !== SVC) return;
+    if (e.origin !== ID_ORIGIN) return; // čuvamo sigurnost
+    const m = e && e.data ? e.data : {};
+    uiLog({ event:'identity_msg', origin: e.origin, hasService: !!m.service, method: m.method, hasPayload: !!m.payload });
 
-    // Prvi put kad uopće dobijemo poruku iz identityja
-    if (!sawFirstIdentityMessage) {
-      sawFirstIdentityMessage = true;
-      if (handshakeTimer) { clearTimeout(handshakeTimer); handshakeTimer = null; }
-      uiLog({ event:'identity_first_msg' });
-    }
-
-    uiLog({ event:'identity_msg', id:m.id, method:m.method, hasPayload: !!m.payload });
-
-    // Ako je ovo odgovor na initialize (neki embed vraća bez method-a)
-    if (!initAcked && m.id && !m.method) {
-      initAcked = true;
-      // Odmah tražimo login
-      const id = uid();
-      const login = { id, service:SVC, method:'login', payload:{ accessLevelRequest:2, webview:true } };
-      uiLog({ event:'login_send', id });
-      send(login);
+    if (!sawAnyIdentityMsg) {
+      sawAnyIdentityMsg = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      // čim vidimo prvi ping iz identity-ja, idemo na login
+      sendLogin();
       return;
     }
 
-    // login → derive
-    if (m.method === 'login' && m.payload) {
+    // Ako vidimo login odgovor (razni oblici), pokupi publicKey i šalji derive
+    if ((m.method === 'login' || !m.method) && m.payload && (m.payload.publicKeyAdded || m.payload.publicKey || m.payload.PublicKeyBase58Check)) {
       const pk = m.payload.publicKeyAdded || m.payload.publicKey || m.payload.PublicKeyBase58Check;
-      if (!pk) { uiLog({ event:'login_no_pk' }); return; }
-
-      const id2 = uid();
-      const derive = {
-        id: id2,
-        service: SVC,
-        method: 'derive',
-        payload: {
-          PublicKeyBase58Check: pk,
-          accessLevel: 2,
-          webview: true,
-          TransactionSpendingLimitResponse: LIMIT
-        }
-      };
-      uiLog({ event:'derive_send', id:id2, pk });
-      send(derive);
+      sendDerive(pk);
       return;
     }
 
-    // derive → RN
+    // Kad stigne derive payload, normaliziraj i proslijedi RN-u
     if (m.method === 'derive' && m.payload) {
       const p = m.payload || {};
       const out = {
@@ -144,6 +155,7 @@
       };
       uiLog({ event:'derive_complete', haveJwt: !!out.jwt, haveDerived: !!out.derivedPublicKeyBase58Check });
       try { RN && RN.postMessage(JSON.stringify({ event:'derive-complete', params: out })); } catch {}
+      return;
     }
   }, false);
 })();
