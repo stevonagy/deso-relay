@@ -34,10 +34,11 @@
     try { LOG.textContent += JSON.stringify(obj) + "\n"; LOG.scrollTop = LOG.scrollHeight; } catch {}
     try { RN && RN.postMessage(JSON.stringify({ kind:'debug', data: obj })); } catch {}
   }
-  function send(msg){ iframe.contentWindow.postMessage(msg, 'https://identity.deso.org'); }
+  // Slanje prema iframeu — koristimo targetOrigin='*' (tolerantno) radi različitih varijanti embeda
+  function send(msg){ iframe.contentWindow && iframe.contentWindow.postMessage(msg, '*'); }
   function uid(){ return 'id-' + Math.random().toString(36).slice(2) + Date.now().toString(36); }
 
-  // Parametri iz query stringa (dozvoljava override iz RN WebView: ?appName=...&submitPost=10&deso=0.05)
+  // Parametri iz queryja:
   const qs = new URLSearchParams(location.search);
   const appName = qs.get('appName') || 'DesoMobile';
   const submitPost = parseInt(qs.get('submitPost') || '10', 10);
@@ -53,24 +54,55 @@
   };
 
   let initialized = false;
+  let sawFirstIdentityMessage = false;
+  let initAcked = false;
+  let handshakeTries = 0;
+  const MAX_TRIES = 10;
+  let handshakeTimer = null;
+
+  function sendInitialize() {
+    const id = uid();
+    const msg = { id, method:'initialize', payload:{}, service:SVC };
+    uiLog({ event:'initialize_send', id, tries: handshakeTries });
+    send(msg);
+  }
+
+  // Retry initialize dok ne dobijemo bilo kakvu identity poruku
+  function ensureHandshake() {
+    if (sawFirstIdentityMessage || initAcked) return;
+    if (handshakeTries >= MAX_TRIES) {
+      uiLog({ event:'initialize_giveup' });
+      return;
+    }
+    handshakeTries++;
+    sendInitialize();
+    handshakeTimer = setTimeout(ensureHandshake, 500);
+  }
 
   iframe.addEventListener('load', function(){
-    const id = uid();
-    uiLog({ event:'initialize_send', id, origin: location.origin });
-    send({ id, method:'initialize', payload:{}, service:SVC });
+    uiLog({ event:'iframe_loaded' });
+    // Kreni s handshake retryjem
+    ensureHandshake();
   });
 
   window.addEventListener('message', function(e){
-    // Origin check – prihvati SAMO identity.deso.org
-    if (e.origin !== 'https://identity.deso.org') return;
-    const m = e.data || {};
-    if (m.service !== SVC) return;
+    // ➜ NE filtriramo strogo po e.origin jer embed ponekad mijenja poddomene / okolnosti.
+    const m = e && e.data ? e.data : null;
+    if (!m || m.service !== SVC) return;
+
+    // Prvi put kad uopće dobijemo poruku iz identityja
+    if (!sawFirstIdentityMessage) {
+      sawFirstIdentityMessage = true;
+      if (handshakeTimer) { clearTimeout(handshakeTimer); handshakeTimer = null; }
+      uiLog({ event:'identity_first_msg' });
+    }
 
     uiLog({ event:'identity_msg', id:m.id, method:m.method, hasPayload: !!m.payload });
 
-    // 1) initialize reply → login
-    if (!initialized && m.id && !m.method) {
-      initialized = true;
+    // Ako je ovo odgovor na initialize (neki embed vraća bez method-a)
+    if (!initAcked && m.id && !m.method) {
+      initAcked = true;
+      // Odmah tražimo login
       const id = uid();
       const login = { id, service:SVC, method:'login', payload:{ accessLevelRequest:2, webview:true } };
       uiLog({ event:'login_send', id });
@@ -78,7 +110,7 @@
       return;
     }
 
-    // 2) login reply → derive
+    // login → derive
     if (m.method === 'login' && m.payload) {
       const pk = m.payload.publicKeyAdded || m.payload.publicKey || m.payload.PublicKeyBase58Check;
       if (!pk) { uiLog({ event:'login_no_pk' }); return; }
@@ -100,7 +132,7 @@
       return;
     }
 
-    // 3) derive reply → normalize + pošalji RN-u
+    // derive → RN
     if (m.method === 'derive' && m.payload) {
       const p = m.payload || {};
       const out = {
