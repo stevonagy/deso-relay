@@ -2,72 +2,92 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>DeSo Relay (WebView bridge)</title>
+  <title>DeSo Relay (WebView/Browser)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 16px; }
-    .ok{color:#0a7a0a} .err{color:#a00}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:24px}
+    code{background:#f3f3f3;padding:2px 4px;border-radius:4px}
+    .ok{color:#0a7a0a}.err{color:#a00}
   </style>
 </head>
 <body>
-  <div id="status">Ready</div>
+  <h3>DeSo Relay</h3>
+  <div id="status">Waiting…</div>
+
   <script>
     (function () {
-      try {
-        var isRN = !!(window.ReactNativeWebView && window.ReactNativeWebView.postMessage);
+      var el = document.getElementById('status');
 
-        // Skupi parametre i iz queryja i iz hasha
-        var collect = function (s) {
-          var out = {};
-          if (!s) return out;
-          s.replace(/^[?#]/, '').split('&').forEach(function (pair) {
-            if (!pair) return;
-            var i = pair.indexOf('=');
-            var k = i >= 0 ? decodeURIComponent(pair.slice(0, i)) : decodeURIComponent(pair);
-            var v = i >= 0 ? decodeURIComponent(pair.slice(i + 1)) : '';
-            out[k] = v;
-          });
-          return out;
-        };
+      function parseAll(url) {
+        var out = {};
+        try {
+          var u = String(url || '');
+          var iQ = u.indexOf('?');
+          var iH = u.indexOf('#');
 
-        var q = collect(window.location.search);
-        var h = collect(window.location.hash);
-        var params = Object.assign({}, q, h);
-
-        if (isRN) {
-          // 💡 Pošalji ISKLJUČIVO ČIST JSON — bez ikakvog dodatnog teksta
-          var payload = { event: 'relay', params: params };
-          window.ReactNativeWebView.postMessage(JSON.stringify(payload));
-          document.getElementById('status').textContent = 'Posted to RN WebView';
-          return;
-        }
-
-        // Fallback za običan browser: vrati se u app preko custom scheme-a
-        var redirect = params.redirect;
-        if (!redirect) {
-          document.getElementById('status').innerHTML =
-            '<span class="err">Missing <code>redirect</code> param.</span>';
-          return;
-        }
-
-        // Izgradi query bez control parametara
-        var out = [];
-        Object.keys(params).forEach(function (k) {
-          if (k === 'redirect' || k === 'pkg') return;
-          out.push(encodeURIComponent(k) + '=' + encodeURIComponent(params[k]));
-        });
-
-        var sep = redirect.indexOf('?') >= 0 ? '&' : (out.length ? '?' : '');
-        var target = redirect + sep + out.join('&');
-
-        document.getElementById('status').innerHTML =
-          '<span class="ok">Redirecting…</span><br><code>' + target + '</code>';
-
-        setTimeout(function () { window.location.href = target; }, 0);
-      } catch (e) {
-        document.getElementById('status').innerHTML =
-          '<span class="err">Relay error:</span> ' + (e && e.message ? e.message : e);
+          function take(s) {
+            if (!s) return;
+            var raw = s.replace(/^[?#]/,'');
+            if (!raw) return;
+            raw.split('&').forEach(function(part){
+              if (!part) return;
+              var kv = part.split('=');
+              var k = decodeURIComponent(kv[0] || '');
+              var v = decodeURIComponent((kv[1] || ''));
+              if (!k) return;
+              out[k] = v;
+            });
+          }
+          if (iQ >= 0) take(u.slice(iQ, iH >= 0 ? iH : u.length));
+          if (iH >= 0) take(u.slice(iH));
+        } catch(e) {}
+        return out;
       }
+
+      var isRN = !!(window.ReactNativeWebView && window.ReactNativeWebView.postMessage);
+      var params = parseAll(location.href);
+
+      // redirect može biti u #redirect=... ili ?redirect=...
+      var redirect = params.redirect;
+
+      // Ako redirect nedostaje, pokušaj pogoditi iz payload-a
+      if (!redirect) {
+        if (params.publicKeyAdded || params.PublicKey) {
+          redirect = 'desomobile://login';
+        } else if (params.derivedPublicKeyBase58Check || params.DerivedPublicKeyBase58Check) {
+          redirect = 'desomobile://derive';
+        }
+      }
+
+      // Ako je RN WebView – pošalji postMessage umjesto redirect
+      if (isRN) {
+        var payload = { event: 'derive-complete', params: params };
+        el.innerHTML = '<span class="ok">Posting payload to React Native…</span>';
+        try {
+          window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+        } catch (e) {
+          // ako ne uspije, pokušaj bar plosnati objekt
+          try { window.ReactNativeWebView.postMessage(payload); } catch (_){}
+        }
+        return;
+      }
+
+      // Browser/deeplink način
+      if (!redirect) {
+        el.innerHTML = '<span class="err">No <code>redirect</code> provided and cannot infer from params.</span>';
+        return;
+      }
+
+      // Sastavi target URL bez meta parametara (redirect, pkg)
+      var out = new URLSearchParams();
+      Object.keys(params).forEach(function(k){
+        if (k === 'redirect' || k === 'pkg') return;
+        out.set(k, params[k]);
+      });
+
+      var target = redirect + (out.toString() ? ('?' + out.toString()) : '');
+      el.innerHTML = '<span class="ok">Redirecting…</span><br/><code>' + target + '</code>';
+      setTimeout(function(){ location.href = target; }, 0);
     })();
   </script>
 </body>
