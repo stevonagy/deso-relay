@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>DeSo Relay (WebView/Browser)</title>
+  <title>DeSo Relay (with decrypt)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:24px}
@@ -11,12 +11,15 @@
   </style>
 </head>
 <body>
-  <h3>DeSo Relay</h3>
-  <div id="status">Waiting…</div>
+  <h3>DeSo Relay (decrypt-enabled)</h3>
+  <div id="status">Booting…</div>
+
+  <iframe id="identity" title="identity" src="https://identity.deso.org/embed?v=2" style="width:0;height:0;border:0;visibility:hidden"></iframe>
 
   <script>
     (function () {
       var el = document.getElementById('status');
+      function log(html){ el.innerHTML = html; }
 
       function parseAll(url) {
         var out = {};
@@ -27,8 +30,7 @@
 
           function take(s) {
             if (!s) return;
-            var raw = s.replace(/^[?#]/,'');
-            if (!raw) return;
+            var raw = s.replace(/^[?#]/,''); if (!raw) return;
             raw.split('&').forEach(function(part){
               if (!part) return;
               var kv = part.split('=');
@@ -44,50 +46,107 @@
         return out;
       }
 
-      var isRN = !!(window.ReactNativeWebView && window.ReactNativeWebView.postMessage);
+      function safeJsonParse(str, fallback) {
+        try { return JSON.parse(str); } catch (e) { return fallback; }
+      }
+
+      function redirectTo(uri, params) {
+        var qs = new URLSearchParams();
+        Object.keys(params || {}).forEach(function(k){
+          if (typeof params[k] !== 'undefined') qs.set(k, String(params[k]));
+        });
+        var out = uri + (qs.toString() ? ('?' + qs.toString()) : '');
+        log('<span class="ok">Redirecting…</span><br/><code>' + out + '</code>');
+        setTimeout(function(){ location.href = out; }, 0);
+      }
+
       var params = parseAll(location.href);
-
-      // redirect može biti u #redirect=... ili ?redirect=...
       var redirect = params.redirect;
+      var kind = (params.kind || '').toLowerCase();
+      var payload = safeJsonParse(params.payload || '{}', {});
 
-      // Ako redirect nedostaje, pokušaj pogoditi iz payload-a
-      if (!redirect) {
-        if (params.publicKeyAdded || params.PublicKey) {
-          redirect = 'desomobile://login';
-        } else if (params.derivedPublicKeyBase58Check || params.DerivedPublicKeyBase58Check) {
-          redirect = 'desomobile://derive';
-        }
+      // RN WebView fallback (not used in this simple file)
+      var isRN = !!(window.ReactNativeWebView && window.ReactNativeWebView.postMessage);
+
+      // Helper: generic Identity postMessage call
+      function callIdentity(method, payload) {
+        return new Promise(function(resolve, reject){
+          var iframe = document.getElementById('identity');
+          if (!iframe || !iframe.contentWindow) return reject(new Error('No identity iframe'));
+          var reqId = 'req_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+
+          function onMessage(e) {
+            // Accept all origins but prefer identity
+            var data = e && e.data;
+            if (!data || (data.id !== reqId && data.service !== 'identity')) return;
+            // v2 API: { id, service:'identity', method, payload } or { id, error }
+            try {
+              if (data.error) {
+                window.removeEventListener('message', onMessage);
+                return reject(new Error(data.error));
+              }
+              if (data.method === method || data.payload || data.decryptedHexes) {
+                window.removeEventListener('message', onMessage);
+                return resolve(data.payload || data.decryptedHexes || data);
+              }
+            } catch (err) {
+              window.removeEventListener('message', onMessage);
+              return reject(err);
+            }
+          }
+          window.addEventListener('message', onMessage);
+
+          var msg = { id: reqId, method: method, payload: payload, service: 'identity' };
+          iframe.contentWindow.postMessage(msg, '*');
+        });
       }
 
-      // Ako je RN WebView – pošalji postMessage umjesto redirect
-      if (isRN) {
-        var payload = { event: 'derive-complete', params: params };
-        el.innerHTML = '<span class="ok">Posting payload to React Native…</span>';
-        try {
-          window.ReactNativeWebView.postMessage(JSON.stringify(payload));
-        } catch (e) {
-          // ako ne uspije, pokušaj bar plosnati objekt
-          try { window.ReactNativeWebView.postMessage(payload); } catch (_){}
+      // If not decrypt, just behave like the old relay: strip meta and redirect back.
+      if (kind !== 'decrypt') {
+        if (!redirect) {
+          // Try to infer legacy redirect
+          if (params.publicKeyAdded || params.PublicKey) redirect = 'desomobile://login';
+          else if (params.derivedPublicKeyBase58Check || params.DerivedPublicKeyBase58Check) redirect = 'desomobile://derive';
         }
+        if (!redirect) {
+          log('<span class="err">No <code>redirect</code> provided.</span>');
+          return;
+        }
+        var passthrough = {};
+        Object.keys(params).forEach(function(k){
+          if (k === 'redirect' || k === 'pkg') return;
+          passthrough[k] = params[k];
+        });
+        return redirectTo(redirect, passthrough);
+      }
+
+      // kind=decrypt flow
+      if (!redirect) {
+        log('<span class="err">Decrypt: missing <code>redirect</code> URI.</span>');
         return;
       }
 
-      // Browser/deeplink način
-      if (!redirect) {
-        el.innerHTML = '<span class="err">No <code>redirect</code> provided and cannot infer from params.</span>';
-        return;
+      var encryptedMessages = payload.encryptedMessages || payload.EncryptedMessages || [];
+      if (!Array.isArray(encryptedMessages) || encryptedMessages.length === 0) {
+        return redirectTo(redirect, { error: 'no_encrypted_messages' });
       }
 
-      // Sastavi target URL bez meta parametara (redirect, pkg)
-      var out = new URLSearchParams();
-      Object.keys(params).forEach(function(k){
-        if (k === 'redirect' || k === 'pkg') return;
-        out.set(k, params[k]);
-      });
+      log('<span class="ok">Decrypting '+ encryptedMessages.length +' messages…</span>');
 
-      var target = redirect + (out.toString() ? ('?' + out.toString()) : '');
-      el.innerHTML = '<span class="ok">Redirecting…</span><br/><code>' + target + '</code>';
-      setTimeout(function(){ location.href = target; }, 0);
+      callIdentity('decrypt', { encryptedMessages: encryptedMessages })
+        .then(function(res){
+          // res may be { decryptedHexes: { [EncryptedHex]: plaintext } } or just the map
+          var map = res && (res.decryptedHexes || res.map || res.result || res);
+          try {
+            var json = JSON.stringify(map || {});
+            redirectTo(redirect, { decryptedHexes: json });
+          } catch (e) {
+            redirectTo(redirect, { error: 'bad_json' });
+          }
+        })
+        .catch(function(err){
+          redirectTo(redirect, { error: String(err && err.message || err || 'decrypt_failed') });
+        });
     })();
   </script>
 </body>
