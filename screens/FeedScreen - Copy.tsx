@@ -17,15 +17,11 @@ import { useSettings } from '../context/SettingsProvider';
 import * as Deso from '../lib/deso';
 import { signTransactionHexViaIdentity } from '../lib/identityAuth';
 
-import { ScrollView } from 'react-native'; // dodaj ako nema
-
-
 type Post = { PostHashHex: string; Body: string; Raw: any; };
 type FeedMode = 'following' | 'recent';
 
 const PAGE = 60;
 const NEW_WINDOW_MIN = 30; // minutes for badge
-
 
 // HTTP helper
 async function postJson(url: string, body: any, abortMs = 12000) {
@@ -126,12 +122,6 @@ export default function FeedScreen() {
   const [replyTarget, setReplyTarget] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
 
-// Repost
-const [repostTarget, setRepostTarget] = useState<string | null>(null);
-const [repostText, setRepostText] = useState('');
-
-
-
 // Comments feature
   const [commentsOpen, setCommentsOpen] = useState<Record<string, boolean>>({});
   const [commentsLoading, setCommentsLoading] = useState<Record<string, boolean>>({});
@@ -162,30 +152,6 @@ const [repostText, setRepostText] = useState('');
       if (changed) setBlocked(next);
     } catch {}
   }
-
-// Moggel custom icons
-const MOGGEL_PK = 'BC1YLgCTkGwjBjD6c6dGogWwMuDmuRYVCSGvN8gqQmajVDaoTg4hAKj';
-
-function getAuthorPk(raw: any): string {
-  return raw?.PosterPublicKeyBase58Check
-      || raw?.ProfileEntryResponse?.PublicKeyBase58Check
-      || '';
-}
-
-function isMoggel(raw: any): boolean {
-  return getAuthorPk(raw) === MOGGEL_PK;
-}
-
-function tipLabel(raw: any, level: 1|2|3): string {
-  if (isMoggel(raw)) {
-    if (level === 1) return '🍎 x1';       // crvena jabuka
-    if (level === 2) return '🍎🍏 x2';     // crvena + zelena jabuka
-    return '🍯 x3';                        // med
-  }
-  return `💎x${level}`;
-}
-
-
 
   // FIX: use robust get-follows-stateless (nodeBase aware)
   const resolveFollowing = useCallback(async () => {
@@ -397,33 +363,6 @@ function tipLabel(raw: any, level: 1|2|3): string {
     finally { setBusy(null); }
   }
 
-async function doRepost(parentPostHashHex: string) {
-  if (!publicKey) return Alert.alert('Login required', 'Please log in to repost.');
-  const body = (repostText || '').trim();
-
-  setBusy(parentPostHashHex + ':repost');
-  try {
-    // submit-post s RepostedPostHashHex + opcionalni Body
-    const req = {
-      UpdaterPublicKeyBase58Check: publicKey,
-      RepostedPostHashHex: parentPostHashHex,
-      BodyObj: body ? { Body: body } : undefined,
-      MinFeeRateNanosPerKB: 1000,
-    };
-    const unsigned = await postJson(nodeBase + '/api/v0/submit-post', req, 12000);
-    await signAndSubmit(unsigned); // već postoji u tvom fileu
-    setRepostText('');
-    setRepostTarget(null);
-    Alert.alert('Success', 'Post has been reposted.');
-    await onRefresh();
-  } catch (e: any) {
-    Alert.alert('Repost failed', e?.message ?? String(e));
-  } finally {
-    setBusy(null);
-  }
-}
-
-
   async function doDiamond(post: Post, level: 1|2|3) {
     if (!publicKey) return Alert.alert('Login required', 'Please log in to send diamonds.');
     setBusy(post.PostHashHex + ':diamond');
@@ -618,39 +557,6 @@ return (
     );
   }
 
-const IconBtn = ({
-  name,
-  onPress,
-  label,
-  disabled,
-}: { name: React.ComponentProps<typeof Ionicons>['name'], onPress: () => void, label: string, disabled?: boolean }) => (
-  <Pressable
-    onPress={onPress}
-    disabled={disabled}
-    accessibilityLabel={label}
-    hitSlop={8}
-    style={{ paddingHorizontal: 8, paddingVertical: 6, opacity: disabled ? 0.6 : 1 }}
-  >
-    <Ionicons name={name} size={18} color={colors.accent} />
-  </Pressable>
-);
-
-const Pill = ({ children, onPress, disabled }: any) => (
-  <Pressable
-    onPress={onPress}
-    disabled={disabled}
-    hitSlop={8}
-    style={{
-      paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999,
-      borderWidth: 1, borderColor: colors.accent, marginRight: 6,
-      opacity: disabled ? 0.6 : 1, flexDirection: 'row', alignItems: 'center',
-    }}
-  >
-    {children}
-  </Pressable>
-);
-
-
   // Render item
   const renderItem = ({ item }: { item: Post }) => {
     const p = item.Raw;
@@ -688,75 +594,28 @@ const Pill = ({ children, onPress, disabled }: any) => (
         {!!imgs?.length && <Image source={{ uri: imgs[0] }} style={{ width: '100%', height: 220, borderRadius: 10, marginTop: 8 }} resizeMode="cover" />}
 
         {/* Actions */}
+        <View style={{ marginTop: 12, flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
+          <Pressable onPress={() => doLike(item)} style={{ paddingHorizontal: 8, paddingVertical: 6 }}>
+            <Text style={{ color: colors.accent, fontWeight: '700' }}>{busy === item.PostHashHex + ':like' ? 'Liking…' : 'Like'}</Text>
+          </Pressable>
+          <View style={{ width: 8 }} />
+          {[1,2,3].map(x => (
+            <Pressable key={x} onPress={() => doDiamond(item, x as 1|2|3)} style={{ paddingHorizontal: 8, paddingVertical: 6 }}>
+              <Text style={{ color: colors.accent, fontWeight: '700' }}>{busy === item.PostHashHex + ':diamond' ? `💎x${x}…` : `💎x${x}`}</Text>
+            </Pressable>
+          ))}
+          <View style={{ width: 8 }} />
+          <Pressable onPress={() => { setReplyTarget(item.PostHashHex); setReplyText(''); }} style={{ paddingHorizontal: 8, paddingVertical: 6 }}>
+            <Text style={{ color: colors.accent, fontWeight: '700' }}>Reply</Text>
+          </Pressable>
 
-
-{/* ACTIONS – kompaktno u jednom redu */}
-<View style={{ marginTop: 10 }}>
-  <ScrollView
-    horizontal
-    showsHorizontalScrollIndicator={false}
-    contentContainerStyle={{ alignItems: 'center' }}
-  >
-    {/* Repost ikona */}
-    <IconBtn
-      name="repeat-outline"
-      label="Repost"
-      onPress={() => { setRepostTarget(item.PostHashHex); setRepostText(''); }}
-      disabled={busy != null}
-    />
-
-    {/* Like ikona */}
-    <IconBtn
-      name="heart-outline"
-      label="Like"
-      onPress={() => doLike(item)}
-      disabled={busy != null}
-    />
-
-    {/* Diamonds / Moggel custom */}
-    {([1,2,3] as const).map((x) => {
-      // ako imaš tipLabel(raw, level) (🍎/🍏/🍯 za Moggel), koristi ga; inače fallback na 💎xN
-      const labelText = (typeof tipLabel === 'function')
-        ? tipLabel(item.Raw, x)
-        : `💎x${x}`;
-      const isBusy = busy === item.PostHashHex + ':diamond';
-      return (
-        <Pill key={x} onPress={() => doDiamond(item, x)} disabled={busy != null}>
-          <Text style={{ color: colors.accent, fontWeight: '700' }}>
-            {isBusy ? `${labelText}…` : labelText}
-          </Text>
-        </Pill>
-      );
-    })}
-
-    {/* Reply ikona */}
-    <IconBtn
-      name="chatbubble-ellipses-outline"
-      label="Reply"
-      onPress={() => { setReplyTarget(item.PostHashHex); setReplyText(''); }}
-      disabled={busy != null}
-    />
-
-    {/* Comments ikona + mali badge broja (ako ga ima) */}
-    <Pressable
-      onPress={() => toggleComments(item.PostHashHex)}
-      hitSlop={8}
-      style={{ paddingHorizontal: 8, paddingVertical: 6, flexDirection: 'row', alignItems: 'center' }}
-    >
-      <Ionicons name="chatbubbles-outline" size={18} color={colors.accent} />
-      {typeof item.Raw?.CommentCount === 'number' && item.Raw.CommentCount > 0 && (
-        <View style={{
-          marginLeft: 6, minWidth: 18, height: 18, borderRadius: 9,
-          backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6
-        }}>
-          <Text style={{ color: '#fff', fontSize: 12, fontWeight: '800' }}>
-            {item.Raw.CommentCount > 99 ? '99+' : item.Raw.CommentCount}
-          </Text>
+          <View style={{ width: 8 }} />
+          <Pressable onPress={() => toggleComments(item.PostHashHex)} style={{ paddingHorizontal: 8, paddingVertical: 6 }}>
+            <Text style={{ color: colors.accent, fontWeight: '700' }}>
+              {`Comments${commentCount ? ` (${commentCount})` : ''}`}
+            </Text>
+          </Pressable>
         </View>
-      )}
-    </Pressable>
-  </ScrollView>
-</View>
 
          {replyTarget === item.PostHashHex && (
           <View style={{ marginTop: 8 }}>
